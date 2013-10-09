@@ -1,0 +1,91 @@
+# Ansible playbook of
+# http://plusbryan.com/my-first-5-minutes-on-a-server-or-essential-security-for-linux-servers
+#
+# Author: Jens Rantil <jens.rantil@gmail.com>
+- hosts: all
+  sudo: yes
+  tasks:
+    # Install `fail2ban`
+    - name: install fail2ban
+      apt: pkg=fail2ban
+           state=latest
+           update_cache=yes
+
+    # Secure the root user
+    - name: set root password
+      user: name=root
+            password={{ item }}
+      with_password: credentials/{{ ansible_host }}/root length=30
+
+    # Fix a `deploy` user
+    - name: generate a key for deployment
+      connection: local
+      shell: ssh-keygen -t rsa -C "Deployment key" -f id_deployment < /dev/null
+    - name: create deploy user
+      user: name=deploy
+            comment="Deployment user"
+            state=present
+    - name: authorized_key for deploy user
+      authorized_key: user=deploy
+                      key="{{ lookup('file', 'id_deployment.pub') }}"
+                      state=present
+    - name: deploy user in sudoers
+      lineinfile: dest=/etc/sudoers
+                  line="deploy  ALL=(ALL) ALL"
+                  state=present
+      notify: validate sudoers
+
+    # Secure `sshd`
+    - name: disallow root ssh login
+      lineinfile: dest=/etc/ssh/sshd_config
+                  line="PermitRootLogin no"
+      notify: restart sshd
+    - name: disallow ssh password login
+      lineinfile: dest=/etc/ssh/sshd_config
+                  line="PasswordAuthentication no"
+      notify: restart sshd
+    - name: only allow ssh from your ips
+      lineinfile: dest=/etc/ssh/sshd_config
+                  line="AllowUsers deploy@{{ sshd_allowed_ips }}"
+      notify: restart sshd
+
+    # Setup firewall
+    - name: allow ssh connections from me
+      command: ufw allow from {{ your-ip }} to any port 22
+    - name: allow all connections to port 80
+      command: ufw allow 80
+    - name: allow all connections to port 443
+      command: ufw allow 443
+    - name: enable ufw firewall
+      command: ufw enable
+
+    # Configure automatic security updates
+    - name: enable automatic security updates
+      apt: pkg=unattended-upgrades
+           state=latest
+           update_cache=yes
+    - name: configure automatic updates settings
+      template: dest=/etc/apt/apt.conf.d/10periodic
+                src=apt-periodic
+                backup=yes
+    - name: configure automatic security update
+      template: dest=/etc/apt/apt.conf.d/50unattended-upgrades
+                src=unattended-upgrades
+                backup=yes
+
+    # Configure `logwatch`
+    - name: install logwatch
+      apt: pkg=logwatch
+           state=latest
+           update_cache=yes
+    - name: setup logwatch cronjob
+      template: src=logwatch.cron.jinja
+                dest=/etc/cron.daily/00logwatch
+                force=yes
+                
+  handlers:
+    - name: validate sudoers
+      command: visudo -cf /etc/sudoers
+    - name: restart sshd
+      service: name=sshd
+               state=restarted
